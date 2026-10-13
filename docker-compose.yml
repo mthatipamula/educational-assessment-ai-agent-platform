@@ -1,0 +1,65 @@
+# Local stack: PostgreSQL + pgvector, the API/agents, the code sandbox and the web app on http://localhost:8070.
+name: eduassess
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: edu
+      POSTGRES_USER: edu
+      POSTGRES_PASSWORD: edu
+    ports: ["5437:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U edu -d edu"]
+      interval: 3s
+      retries: 30
+
+  backend:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://edu:edu@postgres:5432/edu
+      SANDBOX_URL: http://sandbox:8080
+      AWS_CONFIG_FILE: /home/app/.aws/config
+      AWS_SHARED_CREDENTIALS_FILE: /home/app/.aws/credentials
+    volumes:
+      - ${HOME}/.aws:/home/app/.aws:ro       # Bedrock uses your AWS CLI profile; read-only
+    ports: ["8071:8080"]                      # direct API and MCP access (http://localhost:8071/mcp)
+    networks: [default, sandbox_net]
+    depends_on:
+      postgres: { condition: service_healthy }
+      sandbox: { condition: service_started }
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')\""]
+      interval: 3s
+      retries: 40
+    restart: unless-stopped
+
+  # Runs untrusted student code: no internet, read-only filesystem, no capabilities, tight resource limits.
+  sandbox:
+    build: ./sandbox
+    networks: [sandbox_net]
+    read_only: true
+    tmpfs: ["/tmp:size=64m,mode=1777"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 64
+    restart: unless-stopped
+
+  web:
+    build: ./web
+    ports: ["8070:8080"]
+    depends_on:
+      backend: { condition: service_healthy }
+
+networks:
+  sandbox_net:
+    internal: true   # no route to the internet
+
+volumes:
+  pgdata:
